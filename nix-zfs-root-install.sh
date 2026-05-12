@@ -75,86 +75,13 @@ confirm "Do these look correct? Proceeding will partition and format $DISK."
 # Step 3: Write disk-config.nix
 # ─────────────────────────────────────────────
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 info "Step 3: Writing disk-config.nix"
 
-cat > /tmp/disk-config.nix <<EOF
-{ lib, ... }:
-
-{
-  disko.devices = {
-    disk = {
-      main = {
-        type = "disk";
-        device = "$DISK";
-        content = {
-          type = "gpt";
-          partitions = {
-            ESP = {
-              size = "512M";
-              type = "EF00";
-              content = {
-                type = "filesystem";
-                format = "vfat";
-                mountpoint = "/boot/efi";
-              };
-            };
-            boot = {
-              size = "2G";
-              content = {
-                type = "filesystem";
-                format = "ext4";
-                mountpoint = "/boot";
-              };
-            };
-            zfs = {
-              size = "100%";
-              content = {
-                type = "zfs";
-                pool = "rpool";
-              };
-            };
-          };
-        };
-      };
-    };
-
-    zpool = {
-      rpool = {
-        type = "zpool";
-        options = {
-          ashift = "12";
-        };
-        rootFsOptions = {
-          mountpoint = "none";
-        };
-        datasets = {
-          "local/root" = {
-            type = "zfs_fs";
-            options.mountpoint = "legacy";
-            mountpoint = "/";
-            postCreateHook = "zfs snapshot rpool/local/root@blank";
-          };
-          "local/nix" = {
-            type = "zfs_fs";
-            options.mountpoint = "legacy";
-            mountpoint = "/nix";
-          };
-          "safe/home" = {
-            type = "zfs_fs";
-            options.mountpoint = "legacy";
-            mountpoint = "/home";
-          };
-          "safe/persist" = {
-            type = "zfs_fs";
-            options.mountpoint = "legacy";
-            mountpoint = "/persist";
-          };
-        };
-      };
-    };
-  };
-}
-EOF
+envsubst '$DISK' \
+  < "$SCRIPT_DIR/disk-config.nix.tpl" \
+  > /tmp/disk-config.nix
 
 success "disk-config.nix written to /tmp/disk-config.nix"
 
@@ -188,37 +115,9 @@ success "disk-config.nix copied to /mnt/etc/nixos/disk-config.nix"
 
 info "Step 6: Writing configuration.nix"
 
-sudo tee /mnt/etc/nixos/configuration.nix >/dev/null <<EOF
-{ config, pkgs, lib, ... }:
-
-{
-  imports = [
-    ./hardware-configuration.nix
-    ./disk-config.nix
-    "\${builtins.fetchTarball "https://github.com/nix-community/disko/archive/master.tar.gz"}/module.nix"
-  ];
-
-  networking.hostName = "$HOSTNAME";
-  networking.hostId = "$HOST_ID";
-  networking.networkmanager.enable = true;
-
-  boot.supportedFilesystems = [ "zfs" ];
-
-  boot.loader.grub.enable = true;
-  boot.loader.grub.efiSupport = true;
-  boot.loader.grub.device = "nodev";
-  boot.loader.efi.canTouchEfiVariables = true;
-  boot.loader.efi.efiSysMountPoint = "/boot/efi";
-
-  users.users.$USERNAME = {
-    isNormalUser = true;
-    extraGroups = [ "wheel" "networkmanager" ];
-    initialPassword = "$INITIAL_PASSWORD";
-  };
-
-  system.stateVersion = "$STATE_VERSION";
-}
-EOF
+envsubst '$HOSTNAME $HOST_ID $USERNAME $INITIAL_PASSWORD $STATE_VERSION' \
+  < "$SCRIPT_DIR/configuration.nix.tpl" \
+  | sudo tee /mnt/etc/nixos/configuration.nix >/dev/null
 
 success "configuration.nix written to /mnt/etc/nixos/configuration.nix"
 
