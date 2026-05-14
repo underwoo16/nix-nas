@@ -12,6 +12,7 @@
   networking.networkmanager.enable = true;
 
   boot.supportedFilesystems = [ "zfs" ];
+$EXTRA_ZFS_POOLS_LINE
 
   boot.loader.grub.enable = true;
   boot.loader.grub.efiSupport = true;

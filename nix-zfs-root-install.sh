@@ -55,7 +55,21 @@ read -rsp "Initial password: " INITIAL_PASSWORD; echo
 STATE_VERSION=$(nixos-version 2>/dev/null | grep -oP '^\d+\.\d+') || STATE_VERSION="25.11"
 echo "Detected NixOS state version: $STATE_VERSION"
 
-export DISK HOSTNAME HOST_ID USERNAME INITIAL_PASSWORD STATE_VERSION
+echo ""
+echo "Optionally, specify existing ZFS pools to import at boot (e.g. tank backup)."
+read -rp "Extra ZFS pools (space-separated, or leave blank to skip): " EXTRA_POOLS_INPUT
+
+if [[ -n "$EXTRA_POOLS_INPUT" ]]; then
+  NIX_LIST=""
+  for pool in $EXTRA_POOLS_INPUT; do
+    NIX_LIST+="\"$pool\" "
+  done
+  EXTRA_ZFS_POOLS_LINE="  boot.zfs.extraPools = [ ${NIX_LIST}];"
+else
+  EXTRA_ZFS_POOLS_LINE=""
+fi
+
+export DISK HOSTNAME HOST_ID USERNAME INITIAL_PASSWORD STATE_VERSION EXTRA_ZFS_POOLS_LINE
 
 echo ""
 echo "══════════════════════════════════════════"
@@ -67,7 +81,8 @@ printf '%s\n' \
   "HOST_ID=$HOST_ID" \
   "USERNAME=$USERNAME" \
   "INITIAL_PASSWORD=[hidden]" \
-  "STATE_VERSION=$STATE_VERSION"
+  "STATE_VERSION=$STATE_VERSION" \
+  "EXTRA_ZFS_POOLS=${EXTRA_POOLS_INPUT:-(none)}"
 
 confirm "Do these look correct? Proceeding will partition and format $DISK."
 
@@ -115,7 +130,7 @@ success "disk-config.nix copied to /mnt/etc/nixos/disk-config.nix"
 
 info "Step 6: Writing configuration.nix"
 
-envsubst '$HOSTNAME $HOST_ID $USERNAME $INITIAL_PASSWORD $STATE_VERSION' \
+envsubst '$HOSTNAME $HOST_ID $USERNAME $INITIAL_PASSWORD $STATE_VERSION $EXTRA_ZFS_POOLS_LINE' \
   < "$SCRIPT_DIR/configuration.nix.tpl" \
   | sudo tee /mnt/etc/nixos/configuration.nix >/dev/null
 
