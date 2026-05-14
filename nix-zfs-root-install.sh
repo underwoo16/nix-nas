@@ -50,7 +50,14 @@ read -rp  "Disk path (e.g. /dev/disk/by-id/ata-YourDiskIDHere): " DISK
 read -rp  "Hostname: " HOSTNAME
 read -rp  "Host ID (8 hex chars, e.g. a1b2c3d4): " HOST_ID
 read -rp  "Username: " USERNAME
-read -rsp "Initial password: " INITIAL_PASSWORD; echo
+read -rsp "Password: " USER_PASSWORD; echo
+
+# Hash the password for hashedPasswordFile (survives root rollback)
+if command -v mkpasswd &>/dev/null; then
+  HASHED_PASSWORD=$(mkpasswd -m sha-512 "$USER_PASSWORD")
+else
+  HASHED_PASSWORD=$(echo "$USER_PASSWORD" | openssl passwd -6 -stdin)
+fi
 
 STATE_VERSION=$(nixos-version 2>/dev/null | grep -oP '^\d+\.\d+') || STATE_VERSION="25.11"
 echo "Detected NixOS state version: $STATE_VERSION"
@@ -69,7 +76,7 @@ else
   EXTRA_ZFS_POOLS_LINE=""
 fi
 
-export DISK HOSTNAME HOST_ID USERNAME INITIAL_PASSWORD STATE_VERSION EXTRA_ZFS_POOLS_LINE
+export DISK HOSTNAME HOST_ID USERNAME STATE_VERSION EXTRA_ZFS_POOLS_LINE
 
 echo ""
 echo "══════════════════════════════════════════"
@@ -80,7 +87,7 @@ printf '%s\n' \
   "HOSTNAME=$HOSTNAME" \
   "HOST_ID=$HOST_ID" \
   "USERNAME=$USERNAME" \
-  "INITIAL_PASSWORD=[hidden]" \
+  "PASSWORD=[hidden]" \
   "STATE_VERSION=$STATE_VERSION" \
   "EXTRA_ZFS_POOLS=${EXTRA_POOLS_INPUT:-(none)}"
 
@@ -116,13 +123,33 @@ success "disko complete. Disk partitioned, formatted, ZFS pool and datasets crea
 # Step 5: Generate hardware configuration
 # ─────────────────────────────────────────────
 
-info "Step 5: Generating NixOS hardware configuration"
+info "Step 5: Generating NixOS hardware configuration and creating persist layout"
+
+# Create persistent directory structure (survives root rollback)
+run sudo mkdir -p /mnt/persist/etc/nixos
+run sudo mkdir -p /mnt/persist/etc/ssh
+run sudo mkdir -p /mnt/persist/etc/NetworkManager/system-connections
+run sudo mkdir -p /mnt/persist/var/lib/nixos
+run sudo mkdir -p /mnt/persist/var/lib/NetworkManager
+run sudo mkdir -p /mnt/persist/passwords
+
+# Write hashed password file
+echo "$HASHED_PASSWORD" | sudo tee /mnt/persist/passwords/"$USERNAME" >/dev/null
+sudo chmod 600 /mnt/persist/passwords/"$USERNAME"
+success "Hashed password written to /mnt/persist/passwords/$USERNAME"
 
 run sudo nixos-generate-config --root /mnt
-success "Hardware configuration generated at /mnt/etc/nixos/hardware-configuration.nix"
 
-run sudo cp /tmp/disk-config.nix /mnt/etc/nixos/disk-config.nix
-success "disk-config.nix copied to /mnt/etc/nixos/disk-config.nix"
+# Move generated hardware config to /persist and copy disk config there too
+run sudo cp /mnt/etc/nixos/hardware-configuration.nix /mnt/persist/etc/nixos/hardware-configuration.nix
+run sudo cp /tmp/disk-config.nix /mnt/persist/etc/nixos/disk-config.nix
+success "hardware-configuration.nix and disk-config.nix written to /mnt/persist/etc/nixos/"
+
+# Symlink /etc/nixos -> /persist/etc/nixos so nixos-install can find the config
+run sudo rm -rf /mnt/etc/nixos
+run sudo mkdir -p /mnt/etc
+run sudo ln -s /persist/etc/nixos /mnt/etc/nixos
+success "Symlinked /mnt/etc/nixos -> /persist/etc/nixos"
 
 # ─────────────────────────────────────────────
 # Step 6: Write configuration.nix
@@ -130,17 +157,17 @@ success "disk-config.nix copied to /mnt/etc/nixos/disk-config.nix"
 
 info "Step 6: Writing configuration.nix"
 
-envsubst '$HOSTNAME $HOST_ID $USERNAME $INITIAL_PASSWORD $STATE_VERSION $EXTRA_ZFS_POOLS_LINE' \
+envsubst '$HOSTNAME $HOST_ID $USERNAME $STATE_VERSION $EXTRA_ZFS_POOLS_LINE' \
   < "$SCRIPT_DIR/configuration.nix.tpl" \
-  | sudo tee /mnt/etc/nixos/configuration.nix >/dev/null
+  | sudo tee /mnt/persist/etc/nixos/configuration.nix >/dev/null
 
-success "configuration.nix written to /mnt/etc/nixos/configuration.nix"
+success "configuration.nix written to /mnt/persist/etc/nixos/configuration.nix"
 
 echo ""
 echo "══════════════════════════════════════════"
 echo " Final configuration.nix"
 echo "══════════════════════════════════════════"
-cat /mnt/etc/nixos/configuration.nix
+cat /mnt/persist/etc/nixos/configuration.nix
 
 # ─────────────────────────────────────────────
 # Done — manual steps remaining
@@ -154,18 +181,19 @@ echo ""
 echo "  1. Review the config above and confirm it looks correct."
 echo ""
 echo "  2. Run the installer:"
-echo "       sudo nixos-install"
+echo "       sudo nixos-install --no-root-passwd"
 echo ""
-echo "  3. When prompted, set a root password or leave blank if unneeded."
-echo ""
-echo "  4. Reboot into the installed system:"
+echo "  3. Reboot into the installed system:"
 echo "       reboot"
 echo ""
-echo "  5. Log in as: $USERNAME"
+echo "  4. Log in as: $USERNAME"
 echo "     with password: [the one you entered]"
 echo ""
-echo "  6. After first boot, change your password:"
-echo "       passwd"
+echo -e "  \033[1;33mNote:\033[0m Root dataset (rpool/local/root) is rolled back to"
+echo "  a blank snapshot on every boot. All persistent state lives"
+echo "  under /persist (rpool/safe/persist). NixOS configs are at"
+echo "  /persist/etc/nixos/ and bind-mounted into /etc/nixos/."
 echo ""
-warn "Remember to change initialPassword after first login."
+echo "  When adding new services, persist their state by adding paths"
+echo "  to environment.persistence.\"/persist\" in configuration.nix."
 echo ""
