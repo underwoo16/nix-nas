@@ -82,7 +82,7 @@ Before starting, decide on the following:
 |----------|---------|-------|
 | Disk path | `/dev/disk/by-id/ata-WDC_WD40EFAX-...` | Use by-id path, not `/dev/sdX` |
 | Hostname | `nas01` | System hostname |
-| Host ID | `a1b2c3d4` | 8 hex characters (required by ZFS) |
+| Host ID | `a1b2c3d4` | 8 hex characters (required by ZFS); auto-generated if left blank |
 | Username | `admin` | Your login user (added to `wheel` group) |
 | Password | *(prompted securely)* | Hashed with SHA-512 and stored in `/persist` |
 | Extra ZFS pools | `tank backup` | Optional — existing pools to auto-import at boot |

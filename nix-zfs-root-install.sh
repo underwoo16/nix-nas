@@ -127,7 +127,11 @@ else
 fi
 
 read -rp  "Hostname: " HOSTNAME
-read -rp  "Host ID (8 hex chars, e.g. a1b2c3d4): " HOST_ID
+read -rp  "Host ID (8 hex chars) [Enter to auto-generate]: " HOST_ID
+if [[ -z "$HOST_ID" ]]; then
+  HOST_ID=$(head -c4 /dev/urandom | od -A none -t x1 | tr -d ' \n')
+  echo "Auto-generated Host ID: $HOST_ID"
+fi
 read -rp  "Username: " USERNAME
 read -rsp "Password: " USER_PASSWORD; echo
 
