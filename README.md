@@ -337,6 +337,16 @@ The install script uses `envsubst` (from GNU `gettext`) to render template files
 
 This requires network access (to fetch the `gettext` package), which the script already needs for disko and impermanence. No action is required on your part.
 
+### `fileSystems` Conflicting Definition Values
+
+If `nixos-install` fails with:
+
+```
+error: The option 'fileSystems."/boot".device' has conflicting definition values
+```
+
+This means `hardware-configuration.nix` contains `fileSystems` entries that conflict with disko's declarations in `disk-config.nix`. The install script automatically strips these during generation, but if you regenerate `hardware-configuration.nix` manually, you must remove the `fileSystems` and `swapDevices` blocks from it — disko manages all filesystem declarations.
+
 ### Root Rollback Not Working
 
 - Verify the snapshot exists: `sudo zfs list -t snapshot | grep blank`

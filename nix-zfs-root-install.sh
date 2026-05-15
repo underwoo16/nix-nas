@@ -150,6 +150,14 @@ success "Hashed password written to /mnt/persist/passwords/$USERNAME"
 
 run sudo nixos-generate-config --root /mnt
 
+# Remove fileSystems and swapDevices from hardware-configuration.nix — disko manages these.
+# Without this, both disko (disk-config.nix) and hardware-configuration.nix declare the same
+# fileSystems entries with different device values, causing a NixOS evaluation conflict.
+info "Stripping fileSystems/swapDevices from hardware-configuration.nix (disko manages these)"
+sudo sed -i '/^  fileSystems\./,/^    };$/d' /mnt/etc/nixos/hardware-configuration.nix
+sudo sed -i '/^  swapDevices/,/;$/d'         /mnt/etc/nixos/hardware-configuration.nix
+success "hardware-configuration.nix cleaned — filesystem declarations left to disko"
+
 # Copy generated hardware config to /persist and copy disk config to both locations
 run sudo cp /mnt/etc/nixos/hardware-configuration.nix /mnt/persist/etc/nixos/hardware-configuration.nix
 run sudo cp /tmp/disk-config.nix /mnt/persist/etc/nixos/disk-config.nix
