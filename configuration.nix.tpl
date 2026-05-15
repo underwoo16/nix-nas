@@ -40,7 +40,9 @@ $EXTRA_ZFS_POOLS_LINE
   boot.loader.efi.canTouchEfiVariables = true;
   boot.loader.efi.efiSysMountPoint = "/boot/efi";
 
-  # Ensure /persist is mounted early enough for impermanence bind mounts
+  # Ensure /nix and /persist are mounted in the initrd before switch-root.
+  # Without /nix the initrd cannot find stage-2 systemd (lives in /nix/store).
+  fileSystems."/nix".neededForBoot = true;
   fileSystems."/persist".neededForBoot = true;
 
   # Persist state across reboots via impermanence

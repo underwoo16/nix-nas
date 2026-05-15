@@ -324,6 +324,47 @@ Each pool should show `state: ONLINE`.
   sudo nixos-install --root /mnt --no-root-passwd
   ```
 
+### Boot Hangs After "Mounted /sysroot/run" (RCU Stalls)
+
+If the boot gets past ZFS pool import and root rollback but then hangs with messages like:
+
+```
+rcu_preempt detected expedited stalls on CPUs/tasks
+```
+
+The most likely cause is that the `/nix` ZFS dataset is missing `neededForBoot = true`. During the systemd initrd boot, the root filesystem is mounted at `/sysroot`, but if `/nix` isn't also mounted in the initrd, the switch-root fails because stage-2 systemd lives in `/nix/store/…` and is unreachable. The kernel then spins with no forward progress, producing RCU stall warnings (especially common in VMs).
+
+**Fix:** Add `fileSystems."/nix".neededForBoot = true;` to `configuration.nix`.
+
+**Recovery from a live ISO:**
+
+```bash
+# 1. Import the pool and mount all datasets
+sudo zpool import -f rpool
+sudo mount -t zfs rpool/local/root /mnt
+sudo mkdir -p /mnt/nix /mnt/home /mnt/persist /mnt/boot /mnt/boot/efi
+sudo mount -t zfs rpool/local/nix /mnt/nix
+sudo mount -t zfs rpool/safe/home /mnt/home
+sudo mount -t zfs rpool/safe/persist /mnt/persist
+sudo mount /dev/disk/by-label/boot /mnt/boot        # adjust label as needed
+sudo mount /dev/disk/by-label/ESP /mnt/boot/efi      # adjust label as needed
+
+# 2. Add the missing neededForBoot line to configuration.nix
+#    Open /mnt/persist/etc/nixos/configuration.nix in an editor and add:
+#      fileSystems."/nix".neededForBoot = true;
+#    (place it next to the existing fileSystems."/persist".neededForBoot line)
+sudo nano /mnt/persist/etc/nixos/configuration.nix
+
+# 3. Copy the updated config to /mnt/etc/nixos/ so nixos-install can find it
+sudo cp /mnt/persist/etc/nixos/configuration.nix /mnt/etc/nixos/configuration.nix
+
+# 4. Rebuild
+sudo nixos-install --root /mnt --no-root-passwd
+
+# 5. Reboot
+reboot
+```
+
 ### ZFS Pool Won't Import
 
 ```bash
