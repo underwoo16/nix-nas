@@ -51,9 +51,7 @@ On every boot, the initrd rolls back the root dataset before it is mounted:
 zfs rollback -r rpool/local/root@blank
 ```
 
-The configuration explicitly enables the **systemd initrd** (`boot.initrd.systemd.enable = true`) and defines a `rollback` oneshot service that runs after the ZFS pool is imported but before the root filesystem is mounted.
-
-The `@blank` snapshot is created by the install script **after** disko finishes — at which point the root dataset already contains the mount-point directories (`/nix`, `/persist`, `/home`, `/boot`) created by disko for the other datasets. This means after rollback, root is "blank" (no user data) but still has the directories needed for the initrd to mount the other ZFS datasets.
+This runs via `boot.initrd.postDeviceCommands` in the **scripted initrd** — after ZFS pools are imported but before any filesystem is mounted. This is the ZFS equivalent of the btrfs impermanence pattern that uses `postResumeCommands`. The scripted initrd automatically creates mount-point directories (`mkdir -p`) before mounting each filesystem, so the root dataset can be completely empty after rollback.
 
 This means `/` starts fresh each boot. Anything that needs to survive must be:
 - Stored under `/persist` (ZFS dataset `rpool/safe/persist`)
@@ -334,28 +332,17 @@ If the boot gets past ZFS pool import and root rollback but then hangs with mess
 rcu_preempt detected expedited stalls on CPUs/tasks
 ```
 
-**Root cause:** The `@blank` ZFS snapshot was taken too early — by disko's `postCreateHook`, immediately after the root dataset was created but *before* mount-point directories (`/nix`, `/persist`, `/home`, `/boot`) existed. After rollback, root is completely empty, so the initrd's `neededForBoot` mount units fail (no directories to mount onto), the dependency chain deadlocks, and the kernel produces RCU stall warnings.
+**Root cause:** The systemd-based initrd (`boot.initrd.systemd.enable = true`) does not automatically create mount-point directories before mounting filesystems. After rolling back to the `@blank` snapshot, root is empty — no `/nix`, `/persist`, `/home`, or `/boot` directories — so the initrd mount units fail, the dependency chain deadlocks, and the kernel produces RCU stall warnings.
 
-**The fix (already applied to the install script and templates):**
+**The fix:** Use the **scripted initrd** with `boot.initrd.postDeviceCommands` instead of the systemd initrd. The scripted initrd automatically creates mount-point directories (`mkdir -p`) before mounting each filesystem — the same reason the btrfs impermanence approach works.
 
-1. `fileSystems."/nix".neededForBoot = true;` in `configuration.nix` — so the initrd mounts `/nix` before switch-root
-2. The install script recreates the `@blank` snapshot **after** disko finishes — at which point root already contains the mount-point directories
-
-**Recovery from a live ISO (for installs created before this fix):**
+**Recovery from a live ISO:**
 
 ```bash
-# 1. Import the pool and mount root
+# 1. Import the pool and mount all datasets
 sudo zpool import -f rpool
 sudo mount -t zfs rpool/local/root /mnt
-
-# 2. Create mount-point directories on the root dataset
 sudo mkdir -p /mnt/{nix,home,persist,boot}
-
-# 3. Recreate the blank snapshot so it includes these directories
-sudo zfs destroy rpool/local/root@blank
-sudo zfs snapshot rpool/local/root@blank
-
-# 4. Mount the remaining datasets and partitions
 sudo mount -t zfs rpool/local/nix /mnt/nix
 sudo mount -t zfs rpool/safe/home /mnt/home
 sudo mount -t zfs rpool/safe/persist /mnt/persist
@@ -363,15 +350,23 @@ sudo mount /dev/disk/by-label/boot /mnt/boot        # adjust label as needed
 sudo mkdir -p /mnt/boot/efi
 sudo mount /dev/disk/by-label/ESP /mnt/boot/efi      # adjust label as needed
 
-# 5. Add neededForBoot for /nix in configuration.nix (if not already present)
-#    Add this line next to the existing fileSystems."/persist".neededForBoot:
+# 2. Update configuration.nix — replace the systemd initrd rollback with
+#    the scripted initrd approach.  Remove these lines:
+#      boot.initrd.systemd.enable = true;
+#      boot.initrd.systemd.services.rollback = { ... };
+#    And add:
+#      boot.initrd.postDeviceCommands = lib.mkAfter ''
+#        zfs rollback -r rpool/local/root@blank
+#      '';
+#    Also ensure these lines exist:
 #      fileSystems."/nix".neededForBoot = true;
+#      fileSystems."/persist".neededForBoot = true;
 sudo nano /mnt/persist/etc/nixos/configuration.nix
 
-# 6. Copy the updated config so nixos-install can find it
+# 3. Copy the updated config so nixos-install can find it
 sudo cp /mnt/persist/etc/nixos/configuration.nix /mnt/etc/nixos/configuration.nix
 
-# 7. Rebuild and reboot
+# 4. Rebuild and reboot
 sudo nixos-install --root /mnt --no-root-passwd
 reboot
 ```
@@ -407,31 +402,29 @@ This means `hardware-configuration.nix` contains `fileSystems` entries that conf
 
 If `/rollback-test` persists after reboot (see [Post-Install Verification](#post-install-verification)), work through these steps in order:
 
-**1. Verify the systemd initrd is active**
+**1. Verify the rollback command is present**
 
-The configuration sets `boot.initrd.systemd.enable = true`. Confirm it is active:
+The configuration uses `boot.initrd.postDeviceCommands` in the scripted initrd. Check that it was applied:
 
 ```bash
-ls /run/initramfs/etc/systemd/ 2>/dev/null && echo "systemd initrd" || echo "scripted initrd"
+cat /nix/store/*-initrd-*/stage-1-init.sh 2>/dev/null | grep -A2 "postDeviceCommands" || echo "Check generation"
 ```
 
-If you see "scripted initrd", the systemd initrd may not have been applied. Rebuild and reboot:
+If the rollback isn't present, rebuild and reboot:
 
 ```bash
 sudo nixos-rebuild switch
 sudo reboot
 ```
 
-**2. Check the rollback service status**
-
-After boot, inspect the initrd rollback service:
+**2. Check boot logs for rollback errors**
 
 ```bash
-sudo journalctl -b -u rollback.service
+sudo journalctl -b | grep -i "rollback\|zfs"
 ```
 
 Look for errors. Common issues:
-- `zfs-import-rpool.service` failed or is missing — check `sudo journalctl -b -u zfs-import-rpool.service`
+- ZFS pool import failed — check `sudo journalctl -b | grep "zpool import"`
 - `zfs rollback` error — snapshot missing or has dependent clones
 
 **3. Verify the blank snapshot exists**

@@ -15,27 +15,15 @@
   boot.supportedFilesystems = [ "zfs" ];
 $EXTRA_ZFS_POOLS_LINE
 
-  # Use the systemd-based initrd so the rollback service below is honoured.
-  # (The scripted initrd silently ignores boot.initrd.systemd.services.)
-  boot.initrd.systemd.enable = true;
-
   # Roll back rpool/local/root to blank snapshot on every boot.
-  # The @blank snapshot is created by the install script AFTER disko has
-  # finished — so it already contains the mount-point directories (/nix,
-  # /persist, /home, /boot) that neededForBoot mounts require.
-  boot.initrd.systemd.services.rollback = {
-    description = "Rollback ZFS root to blank snapshot";
-    wantedBy = [ "initrd.target" ];
-    requires = [ "zfs-import-rpool.service" ];
-    after = [ "zfs-import-rpool.service" ];
-    before = [ "sysroot.mount" ];
-    path = [ config.boot.zfs.package ];
-    unitConfig.DefaultDependencies = "no";
-    serviceConfig.Type = "oneshot";
-    script = ''
-      zfs rollback -r rpool/local/root@blank
-    '';
-  };
+  # This runs in the scripted initrd after ZFS pools are imported but before
+  # any filesystem is mounted — the same pattern as btrfs impermanence using
+  # postResumeCommands.  The scripted initrd automatically creates mount-point
+  # directories (mkdir -p) before mounting each filesystem, so the root
+  # dataset can be completely empty after rollback.
+  boot.initrd.postDeviceCommands = lib.mkAfter ''
+    zfs rollback -r rpool/local/root@blank
+  '';
 
   boot.loader.grub.enable = true;
   boot.loader.grub.efiSupport = true;
