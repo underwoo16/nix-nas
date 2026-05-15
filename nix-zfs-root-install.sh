@@ -203,6 +203,14 @@ run sudo nix run --extra-experimental-features "nix-command flakes" \
 
 success "disko complete. Disk partitioned, formatted, ZFS pool and datasets created, all mounted under /mnt."
 
+# Recreate the @blank snapshot so it includes the mount-point directories
+# (/nix, /persist, /home, /boot) that disko created on the root dataset.
+# The postCreateHook snapshot was taken before these directories existed.
+info "Recreating blank snapshot (with mount-point directories)"
+run sudo zfs destroy rpool/local/root@blank
+run sudo zfs snapshot rpool/local/root@blank
+success "rpool/local/root@blank now includes mount-point directories"
+
 # ─────────────────────────────────────────────
 # Step 5: Generate hardware configuration
 # ─────────────────────────────────────────────

@@ -49,9 +49,13 @@ On every boot, the initrd rolls back the root dataset before it is mounted:
 
 ```bash
 zfs rollback -r rpool/local/root@blank
+# then create mount-point dirs on the empty root before sysroot.mount
+mount -t zfs rpool/local/root /sysroot
+mkdir -p /sysroot/{nix,persist,home,boot}
+umount /sysroot
 ```
 
-The configuration explicitly enables the **systemd initrd** (`boot.initrd.systemd.enable = true`) and defines a `rollback` oneshot service that runs after the ZFS pool is imported but before the root filesystem is mounted.
+The configuration explicitly enables the **systemd initrd** (`boot.initrd.systemd.enable = true`) and defines a `rollback` oneshot service that runs after the ZFS pool is imported but before the root filesystem is mounted. After rollback the root dataset is empty, so the service also creates mount-point directories that the initrd's `neededForBoot` mounts require (`/nix`, `/persist`, etc.).
 
 This means `/` starts fresh each boot. Anything that needs to survive must be:
 - Stored under `/persist` (ZFS dataset `rpool/safe/persist`)
@@ -332,36 +336,50 @@ If the boot gets past ZFS pool import and root rollback but then hangs with mess
 rcu_preempt detected expedited stalls on CPUs/tasks
 ```
 
-The most likely cause is that the `/nix` ZFS dataset is missing `neededForBoot = true`. During the systemd initrd boot, the root filesystem is mounted at `/sysroot`, but if `/nix` isn't also mounted in the initrd, the switch-root fails because stage-2 systemd lives in `/nix/store/…` and is unreachable. The kernel then spins with no forward progress, producing RCU stall warnings (especially common in VMs).
+**Root cause:** The `@blank` ZFS snapshot is an empty dataset — it contains no directories at all. After rollback, the root filesystem has no `/nix`, `/persist`, `/home`, or `/boot` mount points. The initrd's `neededForBoot` mount units (`sysroot-nix.mount`, `sysroot-persist.mount`) fail because their mount-point directories don't exist, the initrd dependency chain deadlocks, and the kernel produces RCU stall warnings as nothing can make forward progress (especially visible in VMs).
 
-**Fix:** Add `fileSystems."/nix".neededForBoot = true;` to `configuration.nix`.
+**What the current template does:** The rollback service now temporarily mounts root after rollback and creates the mount-point directories before `sysroot.mount` picks it up. If you installed before this fix, you need to recover from a live ISO (see below).
+
+**Two things must be true in `configuration.nix`:**
+
+1. `fileSystems."/nix".neededForBoot = true;` — so the initrd mounts `/nix` (stage-2 systemd lives in `/nix/store`)
+2. The rollback service must create mount-point directories after rolling back to the empty snapshot
 
 **Recovery from a live ISO:**
 
 ```bash
-# 1. Import the pool and mount all datasets
+# 1. Import the pool and mount root
 sudo zpool import -f rpool
 sudo mount -t zfs rpool/local/root /mnt
-sudo mkdir -p /mnt/nix /mnt/home /mnt/persist /mnt/boot /mnt/boot/efi
+
+# 2. Create mount-point directories on the root dataset
+sudo mkdir -p /mnt/{nix,home,persist,boot}
+
+# 3. Recreate the blank snapshot so it includes these directories
+sudo zfs destroy rpool/local/root@blank
+sudo zfs snapshot rpool/local/root@blank
+
+# 4. Mount the remaining datasets and partitions
 sudo mount -t zfs rpool/local/nix /mnt/nix
 sudo mount -t zfs rpool/safe/home /mnt/home
 sudo mount -t zfs rpool/safe/persist /mnt/persist
 sudo mount /dev/disk/by-label/boot /mnt/boot        # adjust label as needed
 sudo mount /dev/disk/by-label/ESP /mnt/boot/efi      # adjust label as needed
 
-# 2. Add the missing neededForBoot line to configuration.nix
-#    Open /mnt/persist/etc/nixos/configuration.nix in an editor and add:
-#      fileSystems."/nix".neededForBoot = true;
-#    (place it next to the existing fileSystems."/persist".neededForBoot line)
+# 5. Update configuration.nix — apply both fixes:
+#    a. Add:  fileSystems."/nix".neededForBoot = true;
+#    b. In the rollback service script, add after the zfs rollback line:
+#         mount -t zfs rpool/local/root /sysroot
+#         mkdir -p /sysroot/{nix,persist,home,boot}
+#         umount /sysroot
+#    (or copy the rollback service block from the current configuration.nix.tpl)
 sudo nano /mnt/persist/etc/nixos/configuration.nix
 
-# 3. Copy the updated config to /mnt/etc/nixos/ so nixos-install can find it
+# 6. Copy the updated config so nixos-install can find it
 sudo cp /mnt/persist/etc/nixos/configuration.nix /mnt/etc/nixos/configuration.nix
 
-# 4. Rebuild
+# 7. Rebuild and reboot
 sudo nixos-install --root /mnt --no-root-passwd
-
-# 5. Reboot
 reboot
 ```
 

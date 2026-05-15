@@ -52,6 +52,8 @@
             type = "zfs_fs";
             options.mountpoint = "legacy";
             mountpoint = "/";
+            # Initial snapshot — the install script recreates it after disko
+            # finishes so the snapshot includes mount-point directories.
             postCreateHook = "zfs snapshot rpool/local/root@blank";
           };
           "local/nix" = {
