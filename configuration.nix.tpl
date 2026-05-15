@@ -21,16 +21,16 @@ $EXTRA_ZFS_POOLS_LINE
   boot.initrd.systemd.enable = true;
 
   # Roll back rpool/local/root to blank snapshot on every boot.
-  # Runs after the ZFS pool is imported but before the root filesystem is
-  # mounted.  Impermanence's create-needed-for-boot-dirs service then
-  # creates the mount-point directories (/nix, /persist, etc.) that
-  # neededForBoot mounts require on the empty root dataset.
+  # Runs after the ZFS pool is imported but before both sysroot.mount and
+  # impermanence's create-needed-for-boot-dirs (which creates mount-point
+  # directories on the empty root).  Without this ordering, the two services
+  # race: if create-needed-for-boot-dirs runs first, rollback wipes its work.
   boot.initrd.systemd.services.rollback = {
     description = "Rollback ZFS root to blank snapshot";
     wantedBy = [ "initrd.target" ];
     requires = [ "zfs-import-rpool.service" ];
     after = [ "zfs-import-rpool.service" ];
-    before = [ "sysroot.mount" ];
+    before = [ "sysroot.mount" "create-needed-for-boot-dirs.service" ];
     path = [ config.boot.zfs.package ];
     unitConfig.DefaultDependencies = "no";
     serviceConfig.Type = "oneshot";

@@ -53,7 +53,13 @@ zfs rollback -r rpool/local/root@blank
 
 The configuration enables the **systemd initrd** (`boot.initrd.systemd.enable = true`) and defines a `rollback` oneshot service that runs after the ZFS pool is imported but before the root filesystem is mounted.
 
-After rollback, the root dataset is completely empty. The impermanence module provides a `create-needed-for-boot-dirs` service that runs in the initrd and creates mount-point directories (`/nix`, `/persist`, etc.) on the empty root before `sysroot.mount` runs. This service was fixed for ZFS in [impermanence PR #220](https://github.com/nix-community/impermanence/pull/220) to depend on `zfs-import.target` instead of device units.
+After rollback, the root dataset is completely empty. The impermanence module provides a `create-needed-for-boot-dirs` service (fixed for ZFS in [PR #220](https://github.com/nix-community/impermanence/pull/220)) that temporarily mounts root and creates mount-point directories (`/nix`, `/persist`, etc.) before `sysroot.mount` runs.
+
+**Ordering is critical** — the rollback service explicitly runs `before` both `sysroot.mount` and `create-needed-for-boot-dirs.service`. Without this, the two services race: if impermanence creates directories first, rollback wipes them.
+
+```
+zfs-import-rpool → rollback → create-needed-for-boot-dirs → sysroot.mount
+```
 
 This means `/` starts fresh each boot. Anything that needs to survive must be:
 - Stored under `/persist` (ZFS dataset `rpool/safe/persist`)
@@ -334,19 +340,23 @@ If the boot gets past ZFS pool import and root rollback but then hangs with mess
 rcu_preempt detected expedited stalls on CPUs/tasks
 ```
 
-**Root cause:** An older version of the impermanence module's `create-needed-for-boot-dirs` service could not work with ZFS — it tried to depend on `.device` units that don't exist for ZFS datasets, causing a deadlock. After rollback the root dataset is empty, and without this service creating mount-point directories, the initrd's `neededForBoot` mount units fail.
+**Root cause:** A race condition between two initrd services. The `rollback` service (`zfs rollback -r rpool/local/root@blank`) and impermanence's `create-needed-for-boot-dirs` service both run before `sysroot.mount`, but without explicit ordering between them. If `create-needed-for-boot-dirs` runs first and creates mount-point directories, `rollback` then wipes them out. Root is empty when `sysroot.mount` runs, so the initrd mount units for `/nix`, `/persist`, etc. fail and the boot deadlocks.
 
-This was fixed in [impermanence PR #220](https://github.com/nix-community/impermanence/pull/220) (merged Sep 2024). The fix makes `create-needed-for-boot-dirs` depend on `zfs-import.target` for ZFS filesystems and sets `DefaultDependencies = false`.
+**The fix:** The rollback service must specify `before = [ "sysroot.mount" "create-needed-for-boot-dirs.service" ]` to guarantee this ordering:
 
-**Verify you have the fix:** If you're fetching impermanence from `master` (as the template does), you already have it. If you're pinning an older commit, update to a commit after `a8fb3f7`.
+```
+zfs-import-rpool → rollback → create-needed-for-boot-dirs → sysroot.mount
+```
 
-**Ensure these lines are in `configuration.nix`:**
+Also ensure these lines are in `configuration.nix`:
 
 ```nix
 boot.initrd.systemd.enable = true;
 fileSystems."/nix".neededForBoot = true;
 fileSystems."/persist".neededForBoot = true;
 ```
+
+**Note:** Impermanence must include [PR #220](https://github.com/nix-community/impermanence/pull/220) (merged Sep 2024) for ZFS support in `create-needed-for-boot-dirs`. If you fetch from `master` (as the template does), you already have it.
 
 **Recovery from a live ISO:**
 
@@ -362,10 +372,9 @@ sudo mount /dev/disk/by-label/boot /mnt/boot        # adjust label as needed
 sudo mkdir -p /mnt/boot/efi
 sudo mount /dev/disk/by-label/ESP /mnt/boot/efi      # adjust label as needed
 
-# 2. Update configuration.nix — ensure these are present:
-#      boot.initrd.systemd.enable = true;
-#      fileSystems."/nix".neededForBoot = true;
-#      fileSystems."/persist".neededForBoot = true;
+# 2. Update configuration.nix — ensure the rollback service has:
+#      before = [ "sysroot.mount" "create-needed-for-boot-dirs.service" ];
+#    (or copy the full rollback block from the current configuration.nix.tpl)
 sudo nano /mnt/persist/etc/nixos/configuration.nix
 
 # 3. Copy the updated config so nixos-install can find it
