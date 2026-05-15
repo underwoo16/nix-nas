@@ -122,7 +122,8 @@ success "disk-config.nix written to /tmp/disk-config.nix"
 
 info "Step 4: Running disko to partition, format, create ZFS datasets, and mount"
 
-run sudo nix run github:nix-community/disko -- \
+run sudo nix run --extra-experimental-features "nix-command flakes" \
+  github:nix-community/disko -- \
   --mode disko \
   /tmp/disk-config.nix
 
