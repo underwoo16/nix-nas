@@ -15,10 +15,26 @@
   boot.supportedFilesystems = [ "zfs" ];
 $EXTRA_ZFS_POOLS_LINE
 
-  # Roll back rpool/local/root to blank snapshot on every boot
+  # Roll back rpool/local/root to blank snapshot on every boot.
+  # Two hooks are defined so the rollback works under both initrd types:
+  #   • Scripted initrd  — uses postDeviceCommands (traditional shell-based stage 1)
+  #   • Systemd initrd   — uses a oneshot service ordered before sysroot.mount
+  # Only the hook matching the active initrd executes; the other is ignored.
   boot.initrd.postDeviceCommands = lib.mkAfter ''
     zfs rollback -r rpool/local/root@blank
   '';
+  boot.initrd.systemd.services.rollback = {
+    description = "Rollback ZFS root to blank snapshot";
+    wantedBy = [ "initrd.target" ];
+    after = [ "zfs-import-rpool.service" ];
+    before = [ "sysroot.mount" ];
+    path = [ config.boot.zfs.package ];
+    unitConfig.DefaultDependencies = "no";
+    serviceConfig.Type = "oneshot";
+    script = ''
+      zfs rollback -r rpool/local/root@blank
+    '';
+  };
 
   boot.loader.grub.enable = true;
   boot.loader.grub.efiSupport = true;
