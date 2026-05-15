@@ -51,7 +51,9 @@ On every boot, the initrd rolls back the root dataset before it is mounted:
 zfs rollback -r rpool/local/root@blank
 ```
 
-This runs via `boot.initrd.postDeviceCommands` in the **scripted initrd** — after ZFS pools are imported but before any filesystem is mounted. This is the ZFS equivalent of the btrfs impermanence pattern that uses `postResumeCommands`. The scripted initrd automatically creates mount-point directories (`mkdir -p`) before mounting each filesystem, so the root dataset can be completely empty after rollback.
+The configuration enables the **systemd initrd** (`boot.initrd.systemd.enable = true`) and defines a `rollback` oneshot service that runs after the ZFS pool is imported but before the root filesystem is mounted.
+
+After rollback, the root dataset is completely empty. The impermanence module provides a `create-needed-for-boot-dirs` service that runs in the initrd and creates mount-point directories (`/nix`, `/persist`, etc.) on the empty root before `sysroot.mount` runs. This service was fixed for ZFS in [impermanence PR #220](https://github.com/nix-community/impermanence/pull/220) to depend on `zfs-import.target` instead of device units.
 
 This means `/` starts fresh each boot. Anything that needs to survive must be:
 - Stored under `/persist` (ZFS dataset `rpool/safe/persist`)
@@ -332,9 +334,19 @@ If the boot gets past ZFS pool import and root rollback but then hangs with mess
 rcu_preempt detected expedited stalls on CPUs/tasks
 ```
 
-**Root cause:** The systemd-based initrd (`boot.initrd.systemd.enable = true`) does not automatically create mount-point directories before mounting filesystems. After rolling back to the `@blank` snapshot, root is empty — no `/nix`, `/persist`, `/home`, or `/boot` directories — so the initrd mount units fail, the dependency chain deadlocks, and the kernel produces RCU stall warnings.
+**Root cause:** An older version of the impermanence module's `create-needed-for-boot-dirs` service could not work with ZFS — it tried to depend on `.device` units that don't exist for ZFS datasets, causing a deadlock. After rollback the root dataset is empty, and without this service creating mount-point directories, the initrd's `neededForBoot` mount units fail.
 
-**The fix:** Use the **scripted initrd** with `boot.initrd.postDeviceCommands` instead of the systemd initrd. The scripted initrd automatically creates mount-point directories (`mkdir -p`) before mounting each filesystem — the same reason the btrfs impermanence approach works.
+This was fixed in [impermanence PR #220](https://github.com/nix-community/impermanence/pull/220) (merged Sep 2024). The fix makes `create-needed-for-boot-dirs` depend on `zfs-import.target` for ZFS filesystems and sets `DefaultDependencies = false`.
+
+**Verify you have the fix:** If you're fetching impermanence from `master` (as the template does), you already have it. If you're pinning an older commit, update to a commit after `a8fb3f7`.
+
+**Ensure these lines are in `configuration.nix`:**
+
+```nix
+boot.initrd.systemd.enable = true;
+fileSystems."/nix".neededForBoot = true;
+fileSystems."/persist".neededForBoot = true;
+```
 
 **Recovery from a live ISO:**
 
@@ -350,15 +362,8 @@ sudo mount /dev/disk/by-label/boot /mnt/boot        # adjust label as needed
 sudo mkdir -p /mnt/boot/efi
 sudo mount /dev/disk/by-label/ESP /mnt/boot/efi      # adjust label as needed
 
-# 2. Update configuration.nix — replace the systemd initrd rollback with
-#    the scripted initrd approach.  Remove these lines:
+# 2. Update configuration.nix — ensure these are present:
 #      boot.initrd.systemd.enable = true;
-#      boot.initrd.systemd.services.rollback = { ... };
-#    And add:
-#      boot.initrd.postDeviceCommands = lib.mkAfter ''
-#        zfs rollback -r rpool/local/root@blank
-#      '';
-#    Also ensure these lines exist:
 #      fileSystems."/nix".neededForBoot = true;
 #      fileSystems."/persist".neededForBoot = true;
 sudo nano /mnt/persist/etc/nixos/configuration.nix
@@ -402,29 +407,31 @@ This means `hardware-configuration.nix` contains `fileSystems` entries that conf
 
 If `/rollback-test` persists after reboot (see [Post-Install Verification](#post-install-verification)), work through these steps in order:
 
-**1. Verify the rollback command is present**
+**1. Verify the systemd initrd is active**
 
-The configuration uses `boot.initrd.postDeviceCommands` in the scripted initrd. Check that it was applied:
+The configuration sets `boot.initrd.systemd.enable = true`. Confirm it is active:
 
 ```bash
-cat /nix/store/*-initrd-*/stage-1-init.sh 2>/dev/null | grep -A2 "postDeviceCommands" || echo "Check generation"
+ls /run/initramfs/etc/systemd/ 2>/dev/null && echo "systemd initrd" || echo "scripted initrd"
 ```
 
-If the rollback isn't present, rebuild and reboot:
+If you see "scripted initrd", the systemd initrd may not have been applied. Rebuild and reboot:
 
 ```bash
 sudo nixos-rebuild switch
 sudo reboot
 ```
 
-**2. Check boot logs for rollback errors**
+**2. Check the rollback service status**
+
+After boot, inspect the initrd rollback service:
 
 ```bash
-sudo journalctl -b | grep -i "rollback\|zfs"
+sudo journalctl -b -u rollback.service
 ```
 
 Look for errors. Common issues:
-- ZFS pool import failed — check `sudo journalctl -b | grep "zpool import"`
+- `zfs-import-rpool.service` failed or is missing — check `sudo journalctl -b -u zfs-import-rpool.service`
 - `zfs rollback` error — snapshot missing or has dependent clones
 
 **3. Verify the blank snapshot exists**

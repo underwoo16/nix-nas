@@ -15,15 +15,29 @@
   boot.supportedFilesystems = [ "zfs" ];
 $EXTRA_ZFS_POOLS_LINE
 
+  # Use the systemd-based initrd.  The impermanence module provides a
+  # create-needed-for-boot-dirs service that creates mount-point directories
+  # on the (empty-after-rollback) root before sysroot.mount runs.
+  boot.initrd.systemd.enable = true;
+
   # Roll back rpool/local/root to blank snapshot on every boot.
-  # This runs in the scripted initrd after ZFS pools are imported but before
-  # any filesystem is mounted — the same pattern as btrfs impermanence using
-  # postResumeCommands.  The scripted initrd automatically creates mount-point
-  # directories (mkdir -p) before mounting each filesystem, so the root
-  # dataset can be completely empty after rollback.
-  boot.initrd.postDeviceCommands = lib.mkAfter ''
-    zfs rollback -r rpool/local/root@blank
-  '';
+  # Runs after the ZFS pool is imported but before the root filesystem is
+  # mounted.  Impermanence's create-needed-for-boot-dirs service then
+  # creates the mount-point directories (/nix, /persist, etc.) that
+  # neededForBoot mounts require on the empty root dataset.
+  boot.initrd.systemd.services.rollback = {
+    description = "Rollback ZFS root to blank snapshot";
+    wantedBy = [ "initrd.target" ];
+    requires = [ "zfs-import-rpool.service" ];
+    after = [ "zfs-import-rpool.service" ];
+    before = [ "sysroot.mount" ];
+    path = [ config.boot.zfs.package ];
+    unitConfig.DefaultDependencies = "no";
+    serviceConfig.Type = "oneshot";
+    script = ''
+      zfs rollback -r rpool/local/root@blank
+    '';
+  };
 
   boot.loader.grub.enable = true;
   boot.loader.grub.efiSupport = true;
