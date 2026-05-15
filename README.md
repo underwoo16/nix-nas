@@ -327,6 +327,16 @@ sudo zpool import           # list available pools
 sudo zpool import -f rpool  # force import (e.g. after unclean shutdown)
 ```
 
+### `envsubst: command not found`
+
+The install script uses `envsubst` (from GNU `gettext`) to render template files. If it isn't available (common on the minimal NixOS ISO), the script automatically re-launches itself inside `nix-shell -p gettext` to provide it. You will see:
+
+```
+[INFO]  envsubst not found — re-launching inside nix-shell with gettext…
+```
+
+This requires network access (to fetch the `gettext` package), which the script already needs for disko and impermanence. No action is required on your part.
+
 ### Root Rollback Not Working
 
 - Verify the snapshot exists: `sudo zfs list -t snapshot | grep blank`

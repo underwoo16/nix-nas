@@ -22,6 +22,15 @@ run() {
 }
 
 # ─────────────────────────────────────────────
+# Dependency check: envsubst (from gettext)
+# ─────────────────────────────────────────────
+
+if ! command -v envsubst &>/dev/null; then
+  info "envsubst not found — re-launching inside nix-shell with gettext…"
+  exec nix-shell -p gettext --run "bash \"$0\""
+fi
+
+# ─────────────────────────────────────────────
 # Step 1: Inspect disks
 # ─────────────────────────────────────────────
 
