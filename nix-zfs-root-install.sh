@@ -150,16 +150,11 @@ success "Hashed password written to /mnt/persist/passwords/$USERNAME"
 
 run sudo nixos-generate-config --root /mnt
 
-# Move generated hardware config to /persist and copy disk config there too
+# Copy generated hardware config to /persist and copy disk config to both locations
 run sudo cp /mnt/etc/nixos/hardware-configuration.nix /mnt/persist/etc/nixos/hardware-configuration.nix
 run sudo cp /tmp/disk-config.nix /mnt/persist/etc/nixos/disk-config.nix
-success "hardware-configuration.nix and disk-config.nix written to /mnt/persist/etc/nixos/"
-
-# Symlink /etc/nixos -> /persist/etc/nixos so nixos-install can find the config
-run sudo rm -rf /mnt/etc/nixos
-run sudo mkdir -p /mnt/etc
-run sudo ln -s /persist/etc/nixos /mnt/etc/nixos
-success "Symlinked /mnt/etc/nixos -> /persist/etc/nixos"
+run sudo cp /tmp/disk-config.nix /mnt/etc/nixos/disk-config.nix
+success "hardware-configuration.nix and disk-config.nix written to /mnt/persist/etc/nixos/ and /mnt/etc/nixos/"
 
 # ─────────────────────────────────────────────
 # Step 6: Write configuration.nix
@@ -171,7 +166,11 @@ envsubst '$HOSTNAME $HOST_ID $USERNAME $STATE_VERSION $EXTRA_ZFS_POOLS_LINE' \
   < "$SCRIPT_DIR/configuration.nix.tpl" \
   | sudo tee /mnt/persist/etc/nixos/configuration.nix >/dev/null
 
-success "configuration.nix written to /mnt/persist/etc/nixos/configuration.nix"
+# Also place in /mnt/etc/nixos/ so nixos-install can find it
+# (impermanence bind-mounts /persist/etc/nixos -> /etc/nixos after first boot)
+run sudo cp /mnt/persist/etc/nixos/configuration.nix /mnt/etc/nixos/configuration.nix
+
+success "configuration.nix written to /mnt/persist/etc/nixos/ and /mnt/etc/nixos/"
 
 echo ""
 echo "══════════════════════════════════════════"
