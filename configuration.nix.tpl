@@ -26,6 +26,9 @@ $EXTRA_ZFS_POOLS_LINE
   boot.loader.efi.canTouchEfiVariables = true;
   boot.loader.efi.efiSysMountPoint = "/boot/efi";
 
+  # Ensure /persist is mounted early enough for impermanence bind mounts
+  fileSystems."/persist".neededForBoot = true;
+
   # Persist state across reboots via impermanence
   environment.persistence."/persist" = {
     hideMounts = true;
