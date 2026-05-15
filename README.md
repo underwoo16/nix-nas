@@ -51,7 +51,7 @@ On every boot, the initrd rolls back the root dataset before it is mounted:
 zfs rollback -r rpool/local/root@blank
 ```
 
-This is configured for both initrd types (scripted and systemd) so the rollback works regardless of your NixOS version or initrd configuration.
+The configuration explicitly enables the **systemd initrd** (`boot.initrd.systemd.enable = true`) and defines a `rollback` oneshot service that runs after the ZFS pool is imported but before the root filesystem is mounted. A `postDeviceCommands` fallback is also present for anyone who overrides back to the scripted initrd.
 
 This means `/` starts fresh each boot. Anything that needs to survive must be:
 - Stored under `/persist` (ZFS dataset `rpool/safe/persist`)
@@ -355,26 +355,34 @@ This means `hardware-configuration.nix` contains `fileSystems` entries that conf
 
 If `/rollback-test` persists after reboot (see [Post-Install Verification](#post-install-verification)), work through these steps in order:
 
-**1. Check which initrd type is active**
+**1. Verify the systemd initrd is active**
+
+The configuration sets `boot.initrd.systemd.enable = true`. Confirm it is active:
 
 ```bash
-# If this path exists, systemd initrd is in use
 ls /run/initramfs/etc/systemd/ 2>/dev/null && echo "systemd initrd" || echo "scripted initrd"
 ```
 
-The `boot.initrd.postDeviceCommands` hook only runs under the **scripted initrd**. If your system uses the **systemd initrd** (common in NixOS 23.11+), that hook is silently ignored. The configuration template includes a `boot.initrd.systemd.services.rollback` service to handle this case — verify it is present:
-
-```bash
-grep -A5 "systemd.services.rollback" /persist/etc/nixos/configuration.nix
-```
-
-If the systemd rollback service is missing, add it to your `configuration.nix` (see the template in this repo) and rebuild:
+If you see "scripted initrd", the systemd initrd may not have been applied. Rebuild and reboot:
 
 ```bash
 sudo nixos-rebuild switch
+sudo reboot
 ```
 
-**2. Verify the blank snapshot exists**
+**2. Check the rollback service status**
+
+After boot, inspect the initrd rollback service:
+
+```bash
+sudo journalctl -b -u rollback.service
+```
+
+Look for errors. Common issues:
+- `zfs-import-rpool.service` failed or is missing — check `sudo journalctl -b -u zfs-import-rpool.service`
+- `zfs rollback` error — snapshot missing or has dependent clones
+
+**3. Verify the blank snapshot exists**
 
 ```bash
 sudo zfs list -t snapshot | grep blank
@@ -385,14 +393,6 @@ Expected: `rpool/local/root@blank`. If missing, create it:
 ```bash
 sudo zfs snapshot rpool/local/root@blank
 ```
-
-**3. Verify `postDeviceCommands` is set (scripted initrd)**
-
-```bash
-grep -A2 "postDeviceCommands" /persist/etc/nixos/configuration.nix
-```
-
-Should show the `zfs rollback` line. If missing, the template may not have rendered correctly.
 
 **4. Test manual rollback**
 
