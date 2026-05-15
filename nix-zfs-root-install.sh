@@ -21,6 +21,54 @@ run() {
   "$@" || die "Command failed: $*"
 }
 
+# Resolve a device path (e.g. /dev/sda, sda, /dev/nvme0n1) to its /dev/disk/by-id/ symlink.
+# If the input is already a by-id path, it is returned as-is.
+# Populates the DISK_BY_ID_MATCHES array with all matching by-id links.
+resolve_disk_by_id() {
+  local input="$1"
+  DISK_BY_ID_MATCHES=()
+
+  # Pass through if already a by-id path
+  if [[ "$input" == /dev/disk/by-id/* ]]; then
+    DISK_BY_ID_MATCHES+=("$input")
+    return 0
+  fi
+
+  # Normalise bare names (e.g. "sda" → "/dev/sda")
+  if [[ "$input" != /dev/* ]]; then
+    input="/dev/$input"
+  fi
+
+  [[ -b "$input" ]] || { warn "$input is not a valid block device"; return 1; }
+
+  local real_dev
+  real_dev=$(readlink -f "$input")
+
+  # Collect all by-id symlinks that point to this device (skip partition entries)
+  local preferred=() fallback=()
+  for link in /dev/disk/by-id/*; do
+    [[ -L "$link" ]] || continue
+    [[ "$link" == *-part* ]] && continue
+    local target
+    target=$(readlink -f "$link")
+    if [[ "$target" == "$real_dev" ]]; then
+      case "$link" in
+        */ata-*|*/nvme-*|*/scsi-*) preferred+=("$link") ;;
+        *) fallback+=("$link") ;;
+      esac
+    fi
+  done
+
+  # Preferred first, then fallback
+  DISK_BY_ID_MATCHES=("${preferred[@]}" "${fallback[@]}")
+
+  [[ ${#DISK_BY_ID_MATCHES[@]} -gt 0 ]] || {
+    warn "No /dev/disk/by-id/ entry found for $input"
+    return 1
+  }
+  return 0
+}
+
 # ─────────────────────────────────────────────
 # Dependency check: envsubst (from gettext)
 # ─────────────────────────────────────────────
@@ -55,7 +103,29 @@ ls -l /dev/disk/by-id
 info "Step 2: Enter install variables"
 
 echo ""
-read -rp  "Disk path (e.g. /dev/disk/by-id/ata-YourDiskIDHere): " DISK
+read -rp  "Disk (e.g. sda, /dev/sda, or /dev/disk/by-id/ata-...): " DISK_INPUT
+
+if ! resolve_disk_by_id "$DISK_INPUT"; then
+  die "Could not resolve '$DISK_INPUT' to a /dev/disk/by-id/ path."
+fi
+
+if [[ ${#DISK_BY_ID_MATCHES[@]} -eq 1 ]]; then
+  DISK="${DISK_BY_ID_MATCHES[0]}"
+  info "Resolved to: $DISK"
+else
+  echo ""
+  echo "Multiple /dev/disk/by-id/ entries found for $DISK_INPUT:"
+  for i in "${!DISK_BY_ID_MATCHES[@]}"; do
+    echo "  $((i+1))) ${DISK_BY_ID_MATCHES[$i]}"
+  done
+  read -rp "Select [1-${#DISK_BY_ID_MATCHES[@]}]: " choice
+  if [[ "$choice" -ge 1 && "$choice" -le ${#DISK_BY_ID_MATCHES[@]} ]] 2>/dev/null; then
+    DISK="${DISK_BY_ID_MATCHES[$((choice-1))]}"
+  else
+    die "Invalid selection."
+  fi
+fi
+
 read -rp  "Hostname: " HOSTNAME
 read -rp  "Host ID (8 hex chars, e.g. a1b2c3d4): " HOST_ID
 read -rp  "Username: " USERNAME
