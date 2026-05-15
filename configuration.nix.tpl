@@ -20,11 +20,6 @@ $EXTRA_ZFS_POOLS_LINE
   boot.initrd.systemd.enable = true;
 
   # Roll back rpool/local/root to blank snapshot on every boot.
-  # The systemd initrd service is the primary mechanism. The postDeviceCommands
-  # fallback is kept for anyone who overrides boot.initrd.systemd.enable = false.
-  boot.initrd.postDeviceCommands = lib.mkAfter ''
-    zfs rollback -r rpool/local/root@blank
-  '';
   boot.initrd.systemd.services.rollback = {
     description = "Rollback ZFS root to blank snapshot";
     wantedBy = [ "initrd.target" ];

@@ -51,7 +51,7 @@ On every boot, the initrd rolls back the root dataset before it is mounted:
 zfs rollback -r rpool/local/root@blank
 ```
 
-The configuration explicitly enables the **systemd initrd** (`boot.initrd.systemd.enable = true`) and defines a `rollback` oneshot service that runs after the ZFS pool is imported but before the root filesystem is mounted. A `postDeviceCommands` fallback is also present for anyone who overrides back to the scripted initrd.
+The configuration explicitly enables the **systemd initrd** (`boot.initrd.systemd.enable = true`) and defines a `rollback` oneshot service that runs after the ZFS pool is imported but before the root filesystem is mounted.
 
 This means `/` starts fresh each boot. Anything that needs to survive must be:
 - Stored under `/persist` (ZFS dataset `rpool/safe/persist`)
