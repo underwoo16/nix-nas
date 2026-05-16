@@ -12,32 +12,35 @@
   networking.hostId = "$HOST_ID";
   networking.networkmanager.enable = true;
 
-  boot.supportedFilesystems = [ "zfs" ];
+  boot.supportedFilesystems = [ "btrfs" "zfs" ];
 $EXTRA_ZFS_POOLS_LINE
 
-  # Use the systemd-based initrd.  The impermanence module provides a
-  # create-needed-for-boot-dirs service that creates mount-point directories
-  # on the (empty-after-rollback) root before sysroot.mount runs.
-  boot.initrd.systemd.enable = true;
+  # Recreate the root BTRFS subvolume on every boot.
+  # Old roots are kept for 30 days in case of crashes or power outages.
+  boot.initrd.postResumeCommands = lib.mkAfter ''
+    mkdir /btrfs_tmp
+    mount /dev/disk/by-partlabel/disk-main-root /btrfs_tmp
+    if [[ -e /btrfs_tmp/root ]]; then
+      mkdir -p /btrfs_tmp/old_roots
+      timestamp=$(date --date="@$(stat -c %Y /btrfs_tmp/root)" "+%Y-%m-%d_%H:%M:%S")
+      mv /btrfs_tmp/root "/btrfs_tmp/old_roots/$timestamp"
+    fi
 
-  # Roll back rpool/local/root to blank snapshot on every boot.
-  # Runs after the ZFS pool is imported but before both sysroot.mount and
-  # impermanence's create-needed-for-boot-dirs (which creates mount-point
-  # directories on the empty root).  Without this ordering, the two services
-  # race: if create-needed-for-boot-dirs runs first, rollback wipes its work.
-  boot.initrd.systemd.services.rollback = {
-    description = "Rollback ZFS root to blank snapshot";
-    wantedBy = [ "initrd.target" ];
-    requires = [ "zfs-import-rpool.service" ];
-    after = [ "zfs-import-rpool.service" ];
-    before = [ "sysroot.mount" "create-needed-for-boot-dirs.service" ];
-    path = [ config.boot.zfs.package ];
-    unitConfig.DefaultDependencies = "no";
-    serviceConfig.Type = "oneshot";
-    script = ''
-      zfs rollback -r rpool/local/root@blank
-    '';
-  };
+    delete_subvolume_recursively() {
+      IFS=$'\n'
+      for i in $(btrfs subvolume list -o "$1" | cut -f 9- -d ' '); do
+        delete_subvolume_recursively "/btrfs_tmp/$i"
+      done
+      btrfs subvolume delete "$1"
+    }
+
+    for i in $(find /btrfs_tmp/old_roots/ -maxdepth 1 -mtime +30); do
+      delete_subvolume_recursively "$i"
+    done
+
+    btrfs subvolume create /btrfs_tmp/root
+    umount /btrfs_tmp
+  '';
 
   boot.loader.grub.enable = true;
   boot.loader.grub.efiSupport = true;
@@ -45,13 +48,13 @@ $EXTRA_ZFS_POOLS_LINE
   boot.loader.efi.canTouchEfiVariables = true;
   boot.loader.efi.efiSysMountPoint = "/boot/efi";
 
-  # Ensure /nix and /persist are mounted in the initrd before switch-root.
-  # Without /nix the initrd cannot find stage-2 systemd (lives in /nix/store).
+  # Ensure /nix and /persistent are mounted in the initrd before switch-root.
+  # Without /nix the initrd cannot find stage-2 binaries (lives in /nix/store).
   fileSystems."/nix".neededForBoot = true;
-  fileSystems."/persist".neededForBoot = true;
+  fileSystems."/persistent".neededForBoot = true;
 
   # Persist state across reboots via impermanence
-  environment.persistence."/persist" = {
+  environment.persistence."/persistent" = {
     hideMounts = true;
     directories = [
       "/etc/nixos"
@@ -64,19 +67,19 @@ $EXTRA_ZFS_POOLS_LINE
     ];
   };
 
-  # Generate SSH host keys into /persist so they survive rollback
+  # Generate SSH host keys into /persistent so they survive root rotation
   services.openssh = {
     enable = true;
     hostKeys = [
-      { path = "/persist/etc/ssh/ssh_host_ed25519_key"; type = "ed25519"; }
-      { path = "/persist/etc/ssh/ssh_host_rsa_key"; type = "rsa"; bits = 4096; }
+      { path = "/persistent/etc/ssh/ssh_host_ed25519_key"; type = "ed25519"; }
+      { path = "/persistent/etc/ssh/ssh_host_rsa_key"; type = "rsa"; bits = 4096; }
     ];
   };
 
   users.users.$USERNAME = {
     isNormalUser = true;
     extraGroups = [ "wheel" "networkmanager" ];
-    hashedPasswordFile = "/persist/passwords/$USERNAME";
+    hashedPasswordFile = "/persistent/passwords/$USERNAME";
   };
 
   system.stateVersion = "$STATE_VERSION";

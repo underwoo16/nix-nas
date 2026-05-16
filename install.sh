@@ -194,33 +194,33 @@ success "disk-config.nix written to /tmp/disk-config.nix"
 # Step 4: Run disko
 # ─────────────────────────────────────────────
 
-info "Step 4: Running disko to partition, format, create ZFS datasets, and mount"
+info "Step 4: Running disko to partition, format, create BTRFS subvolumes, and mount"
 
 run sudo nix run --extra-experimental-features "nix-command flakes" \
   github:nix-community/disko -- \
   --mode disko \
   /tmp/disk-config.nix
 
-success "disko complete. Disk partitioned, formatted, ZFS pool and datasets created, all mounted under /mnt."
+success "disko complete. Disk partitioned, formatted, BTRFS subvolumes created, all mounted under /mnt."
 
 # ─────────────────────────────────────────────
 # Step 5: Generate hardware configuration
 # ─────────────────────────────────────────────
 
-info "Step 5: Generating NixOS hardware configuration and creating persist layout"
+info "Step 5: Generating NixOS hardware configuration and creating persistent layout"
 
-# Create persistent directory structure (survives root rollback)
-run sudo mkdir -p /mnt/persist/etc/nixos
-run sudo mkdir -p /mnt/persist/etc/ssh
-run sudo mkdir -p /mnt/persist/etc/NetworkManager/system-connections
-run sudo mkdir -p /mnt/persist/var/lib/nixos
-run sudo mkdir -p /mnt/persist/var/lib/NetworkManager
-run sudo mkdir -p /mnt/persist/passwords
+# Create persistent directory structure (survives root rotation)
+run sudo mkdir -p /mnt/persistent/etc/nixos
+run sudo mkdir -p /mnt/persistent/etc/ssh
+run sudo mkdir -p /mnt/persistent/etc/NetworkManager/system-connections
+run sudo mkdir -p /mnt/persistent/var/lib/nixos
+run sudo mkdir -p /mnt/persistent/var/lib/NetworkManager
+run sudo mkdir -p /mnt/persistent/passwords
 
 # Write hashed password file
-echo "$HASHED_PASSWORD" | sudo tee /mnt/persist/passwords/"$USERNAME" >/dev/null
-sudo chmod 600 /mnt/persist/passwords/"$USERNAME"
-success "Hashed password written to /mnt/persist/passwords/$USERNAME"
+echo "$HASHED_PASSWORD" | sudo tee /mnt/persistent/passwords/"$USERNAME" >/dev/null
+sudo chmod 600 /mnt/persistent/passwords/"$USERNAME"
+success "Hashed password written to /mnt/persistent/passwords/$USERNAME"
 
 run sudo nixos-generate-config --root /mnt
 
@@ -232,11 +232,11 @@ sudo sed -i '/^  fileSystems\./,/^    };$/d' /mnt/etc/nixos/hardware-configurati
 sudo sed -i '/^  swapDevices/,/;$/d'         /mnt/etc/nixos/hardware-configuration.nix
 success "hardware-configuration.nix cleaned — filesystem declarations left to disko"
 
-# Copy generated hardware config to /persist and copy disk config to both locations
-run sudo cp /mnt/etc/nixos/hardware-configuration.nix /mnt/persist/etc/nixos/hardware-configuration.nix
-run sudo cp /tmp/disk-config.nix /mnt/persist/etc/nixos/disk-config.nix
+# Copy generated hardware config to /persistent and copy disk config to both locations
+run sudo cp /mnt/etc/nixos/hardware-configuration.nix /mnt/persistent/etc/nixos/hardware-configuration.nix
+run sudo cp /tmp/disk-config.nix /mnt/persistent/etc/nixos/disk-config.nix
 run sudo cp /tmp/disk-config.nix /mnt/etc/nixos/disk-config.nix
-success "hardware-configuration.nix and disk-config.nix written to /mnt/persist/etc/nixos/ and /mnt/etc/nixos/"
+success "hardware-configuration.nix and disk-config.nix written to /mnt/persistent/etc/nixos/ and /mnt/etc/nixos/"
 
 # ─────────────────────────────────────────────
 # Step 6: Write configuration.nix
@@ -246,19 +246,19 @@ info "Step 6: Writing configuration.nix"
 
 envsubst '$HOSTNAME $HOST_ID $USERNAME $STATE_VERSION $EXTRA_ZFS_POOLS_LINE' \
   < "$SCRIPT_DIR/configuration.nix.tpl" \
-  | sudo tee /mnt/persist/etc/nixos/configuration.nix >/dev/null
+  | sudo tee /mnt/persistent/etc/nixos/configuration.nix >/dev/null
 
 # Also place in /mnt/etc/nixos/ so nixos-install can find it
-# (impermanence bind-mounts /persist/etc/nixos -> /etc/nixos after first boot)
-run sudo cp /mnt/persist/etc/nixos/configuration.nix /mnt/etc/nixos/configuration.nix
+# (impermanence bind-mounts /persistent/etc/nixos -> /etc/nixos after first boot)
+run sudo cp /mnt/persistent/etc/nixos/configuration.nix /mnt/etc/nixos/configuration.nix
 
-success "configuration.nix written to /mnt/persist/etc/nixos/ and /mnt/etc/nixos/"
+success "configuration.nix written to /mnt/persistent/etc/nixos/ and /mnt/etc/nixos/"
 
 echo ""
 echo "══════════════════════════════════════════"
 echo " Final configuration.nix"
 echo "══════════════════════════════════════════"
-cat /mnt/persist/etc/nixos/configuration.nix
+cat /mnt/persistent/etc/nixos/configuration.nix
 
 # ─────────────────────────────────────────────
 # Done — manual steps remaining
@@ -280,11 +280,12 @@ echo ""
 echo "  4. Log in as: $USERNAME"
 echo "     with password: [the one you entered]"
 echo ""
-echo -e "  \033[1;33mNote:\033[0m Root dataset (rpool/local/root) is rolled back to"
-echo "  a blank snapshot on every boot. All persistent state lives"
-echo "  under /persist (rpool/safe/persist). NixOS configs are at"
-echo "  /persist/etc/nixos/ and bind-mounted into /etc/nixos/."
+echo -e "  \033[1;33mNote:\033[0m The root BTRFS subvolume is recreated fresh on"
+echo "  every boot. Old roots are kept for 30 days under /old_roots."
+echo "  All persistent state lives under /persistent."
+echo "  NixOS configs are at /persistent/etc/nixos/ and bind-mounted"
+echo "  into /etc/nixos/."
 echo ""
 echo "  When adding new services, persist their state by adding paths"
-echo "  to environment.persistence.\"/persist\" in configuration.nix."
+echo "  to environment.persistence.\"/persistent\" in configuration.nix."
 echo ""

@@ -1,12 +1,13 @@
 # nix-nas
 
-Declarative NixOS configuration for a ZFS-based NAS/server.
+Declarative NixOS configuration for a BTRFS-based NAS/server with optional ZFS storage pools.
 
 This repository provides a single interactive install script that takes a NixOS live ISO to a fully working system with:
 
-- **ZFS-on-root** via [disko](https://github.com/nix-community/disko) — automated partitioning and dataset creation
-- **Impermanence** via [nix-community/impermanence](https://github.com/nix-community/impermanence) — the root dataset (`rpool/local/root`) is rolled back to a blank snapshot on every boot; only explicitly persisted state survives
-- **Persistent state** under `/persist` — NixOS configs, SSH host keys, NetworkManager connections, and user password hashes all live on a dedicated ZFS dataset (`rpool/safe/persist`)
+- **BTRFS-on-root** via [disko](https://github.com/nix-community/disko) — automated partitioning and subvolume creation
+- **Impermanence** via [nix-community/impermanence](https://github.com/nix-community/impermanence) — the root subvolume is recreated fresh on every boot; only explicitly persisted state survives
+- **Persistent state** under `/persistent` — NixOS configs, SSH host keys, NetworkManager connections, and user password hashes all live on a dedicated BTRFS subvolume
+- **Optional ZFS pool imports** — external ZFS pools (e.g. RAID arrays for bulk storage) can be auto-imported at boot
 - **GRUB with UEFI** boot and a separate `/boot` partition (ext4) for kernel/initrd
 
 ---
@@ -31,48 +32,49 @@ The install script uses disko to create a GPT partition table with three partiti
 |-----------|------|--------|-------------|
 | ESP | 512 MB | FAT32 | `/boot/efi` |
 | boot | 2 GB | ext4 | `/boot` |
-| zfs | Remaining | ZFS pool `rpool` | *(datasets below)* |
+| root | Remaining | BTRFS | *(subvolumes below)* |
 
-### ZFS Dataset Layout
-
-```
-rpool
-├── local/root   →  /        (rolled back to @blank snapshot every boot)
-├── local/nix    →  /nix     (Nix store — survives rollback)
-├── safe/home    →  /home    (user home directories)
-└── safe/persist →  /persist (all persistent system state)
-```
-
-### Root Rollback
-
-On every boot, the initrd rolls back the root dataset before it is mounted:
-
-```bash
-zfs rollback -r rpool/local/root@blank
-```
-
-The configuration enables the **systemd initrd** (`boot.initrd.systemd.enable = true`) and defines a `rollback` oneshot service that runs after the ZFS pool is imported but before the root filesystem is mounted.
-
-After rollback, the root dataset is completely empty. The impermanence module provides a `create-needed-for-boot-dirs` service (fixed for ZFS in [PR #220](https://github.com/nix-community/impermanence/pull/220)) that temporarily mounts root and creates mount-point directories (`/nix`, `/persist`, etc.) before `sysroot.mount` runs.
-
-**Ordering is critical** — the rollback service explicitly runs `before` both `sysroot.mount` and `create-needed-for-boot-dirs.service`. Without this, the two services race: if impermanence creates directories first, rollback wipes them.
+### BTRFS Subvolume Layout
 
 ```
-zfs-import-rpool → rollback → create-needed-for-boot-dirs → sysroot.mount
+BTRFS partition
+├── root         →  /            (recreated fresh every boot)
+├── nix          →  /nix         (Nix store — survives reboot)
+├── persistent   →  /persistent  (all persistent system state)
+├── home         →  /home        (user home directories)
+└── old_roots/                   (previous roots, auto-deleted after 30 days)
+    ├── 2026-05-14_10:30:00
+    └── ...
 ```
 
-This means `/` starts fresh each boot. Anything that needs to survive must be:
-- Stored under `/persist` (ZFS dataset `rpool/safe/persist`)
-- Declared in `environment.persistence."/persist"` in `configuration.nix`
+All subvolumes are mounted with `compress=zstd` and `noatime` for performance.
+
+### Root Rotation
+
+On every boot, the initrd rotates the root subvolume before mounting filesystems:
+
+1. Mount the BTRFS partition to a temporary directory
+2. Move the current `root` subvolume to `old_roots/<timestamp>`
+3. Delete any old roots older than 30 days
+4. Create a fresh, empty `root` subvolume
+5. Unmount the temporary directory
+
+This is handled by `boot.initrd.postResumeCommands` in `configuration.nix`, following the [impermanence BTRFS guide](https://github.com/nix-community/impermanence#btrfs-subvolumes).
+
+After rotation, `/` starts completely empty each boot. Anything that needs to survive must be:
+- Stored under `/persistent` (BTRFS subvolume)
+- Declared in `environment.persistence."/persistent"` in `configuration.nix`
+
+Unlike ZFS rollback, old roots are preserved for 30 days. This provides a safety net — if something goes wrong, you can recover files from previous boots by mounting the BTRFS partition and inspecting `old_roots/`.
 
 ### Template System
 
 The install script uses `envsubst` to render two Nix template files:
 
-- **`disk-config.nix.tpl`** → `/persist/etc/nixos/disk-config.nix` (substitutes `$DISK`)
-- **`configuration.nix.tpl`** → `/persist/etc/nixos/configuration.nix` (substitutes `$HOSTNAME`, `$HOST_ID`, `$USERNAME`, `$STATE_VERSION`, `$EXTRA_ZFS_POOLS_LINE`)
+- **`disk-config.nix.tpl`** → `/persistent/etc/nixos/disk-config.nix` (substitutes `$DISK`)
+- **`configuration.nix.tpl`** → `/persistent/etc/nixos/configuration.nix` (substitutes `$HOSTNAME`, `$HOST_ID`, `$USERNAME`, `$STATE_VERSION`, `$EXTRA_ZFS_POOLS_LINE`)
 
-The generated `hardware-configuration.nix` is created by `nixos-generate-config` and placed alongside them in `/persist/etc/nixos/`.
+The generated `hardware-configuration.nix` is created by `nixos-generate-config` and placed alongside them in `/persistent/etc/nixos/`.
 
 ---
 
@@ -92,10 +94,10 @@ Before starting, decide on the following:
 |----------|---------|-------|
 | Disk path | `/dev/disk/by-id/ata-WDC_WD40EFAX-...` | Use by-id path, not `/dev/sdX` |
 | Hostname | `nas01` | System hostname |
-| Host ID | `a1b2c3d4` | 8 hex characters (required by ZFS); auto-generated if left blank |
+| Host ID | `a1b2c3d4` | 8 hex characters (required if importing ZFS pools); auto-generated if left blank |
 | Username | `admin` | Your login user (added to `wheel` group) |
-| Password | *(prompted securely)* | Hashed with SHA-512 and stored in `/persist` |
-| Extra ZFS pools | `tank backup` | Optional — existing pools to auto-import at boot |
+| Password | *(prompted securely)* | Hashed with SHA-512 and stored in `/persistent` |
+| Extra ZFS pools | `tank backup` | Optional — existing ZFS pools to auto-import at boot |
 
 ### Bare-Metal Preparation
 
@@ -160,7 +162,7 @@ scp user@other-machine:~/nix-nas/* /tmp/nix-nas/
 
 ```bash
 cd /tmp/nix-nas
-sudo bash nix-zfs-root-install.sh
+sudo bash install.sh
 ```
 
 The script will walk you through each step interactively:
@@ -168,9 +170,9 @@ The script will walk you through each step interactively:
 1. **Disk inspection** — displays `lsblk` and `/dev/disk/by-id` so you can identify your target disk
 2. **Variable collection** — prompts for disk path, hostname, host ID, username, password, and optional extra ZFS pools
 3. **Confirmation** — shows your choices and asks you to confirm before destructive operations
-4. **Disko** — partitions the disk, creates the ZFS pool and datasets, mounts everything under `/mnt`
-5. **Hardware config** — runs `nixos-generate-config`, sets up `/persist` directory structure, writes hashed password file
-6. **Configuration** — renders `configuration.nix` and `disk-config.nix` from templates into `/mnt/persist/etc/nixos/`
+4. **Disko** — partitions the disk, creates the BTRFS subvolumes, mounts everything under `/mnt`
+5. **Hardware config** — runs `nixos-generate-config`, sets up `/persistent` directory structure, writes hashed password file
+6. **Configuration** — renders `configuration.nix` and `disk-config.nix` from templates into `/mnt/persistent/etc/nixos/`
 
 At the end, the script prints the final `configuration.nix` for you to review.
 
@@ -200,46 +202,50 @@ Remove the USB drive or ISO when prompted (or adjust boot order in BIOS/VM setti
 
 After rebooting, log in with the username and password you chose during installation. Then run through these checks:
 
-### ZFS Pool Health
+### BTRFS Filesystem Health
 
 ```bash
-sudo zpool status rpool
+sudo btrfs filesystem show
 ```
 
-Expect `state: ONLINE` with no errors. Then list all datasets:
+Expect the BTRFS partition to appear with the correct device. Then list subvolumes:
 
 ```bash
-sudo zfs list
+sudo btrfs subvolume list /
 ```
 
-You should see `rpool/local/root`, `rpool/local/nix`, `rpool/safe/home`, and `rpool/safe/persist`.
+You should see `root`, `nix`, `persistent`, and `home` subvolumes.
 
-### Root Rollback
+### Root Rotation
 
-Verify the blank snapshot exists:
-
-```bash
-sudo zfs list -t snapshot
-```
-
-You should see `rpool/local/root@blank`. Since the root dataset is rolled back on every boot, creating a file in `/` and rebooting should make it disappear:
+Verify root rotation is working by creating a test file and rebooting:
 
 ```bash
-sudo touch /rollback-test
-ls /rollback-test   # should exist now
+sudo touch /rotation-test
+ls /rotation-test   # should exist now
 sudo reboot
 # after reboot:
-ls /rollback-test   # should be gone
+ls /rotation-test   # should be gone
 ```
 
-> **If `/rollback-test` is still present after reboot**, the rollback is not executing. See [Root Rollback Not Working](#root-rollback-not-working) in Troubleshooting.
+> **If `/rotation-test` is still present after reboot**, root rotation is not executing. See [Root Rotation Not Working](#root-rotation-not-working) in Troubleshooting.
+
+Check that old roots are being preserved:
+
+```bash
+sudo mount /dev/disk/by-partlabel/disk-main-root /mnt
+ls /mnt/old_roots/
+sudo umount /mnt
+```
+
+You should see timestamped directories from previous boots.
 
 ### Persistence
 
 Check that persisted directories are properly bind-mounted:
 
 ```bash
-mount | grep persist
+mount | grep persistent
 ```
 
 You should see bind mounts for `/etc/nixos`, `/etc/NetworkManager/system-connections`, `/var/lib/nixos`, and `/var/lib/NetworkManager`.
@@ -247,7 +253,7 @@ You should see bind mounts for `/etc/nixos`, `/etc/NetworkManager/system-connect
 Verify configs are in place:
 
 ```bash
-ls /persist/etc/nixos/
+ls /persistent/etc/nixos/
 # Should contain: configuration.nix  disk-config.nix  hardware-configuration.nix
 ```
 
@@ -260,7 +266,7 @@ systemctl status sshd
 Should show `active (running)`. Verify host keys are persisted:
 
 ```bash
-ls -la /persist/etc/ssh/
+ls -la /persistent/etc/ssh/
 # Should contain ssh_host_ed25519_key and ssh_host_rsa_key (plus .pub files)
 ```
 
@@ -321,76 +327,67 @@ Each pool should show `state: ONLINE`.
 - Enter BIOS/firmware and set the installed disk as the first boot device
 - Verify UEFI mode was used during install (legacy BIOS won't find the ESP)
 - **VM:** Confirm the VM firmware is set to UEFI/OVMF, not legacy BIOS
-- If GRUB is missing, boot back into the live ISO, import the pool, mount, and re-run install:
+- If GRUB is missing, boot back into the live ISO, mount, and re-run install:
   ```bash
-  sudo zpool import -f rpool
-  sudo mount -t zfs rpool/local/root /mnt
-  sudo mount -t zfs rpool/local/nix /mnt/nix
-  sudo mount -t zfs rpool/safe/persist /mnt/persist
+  sudo mount /dev/disk/by-partlabel/disk-main-root /mnt -o subvol=root
+  sudo mkdir -p /mnt/{nix,home,persistent,boot}
+  sudo mount /dev/disk/by-partlabel/disk-main-root /mnt/nix -o subvol=nix
+  sudo mount /dev/disk/by-partlabel/disk-main-root /mnt/home -o subvol=home
+  sudo mount /dev/disk/by-partlabel/disk-main-root /mnt/persistent -o subvol=persistent
   sudo mount /dev/disk/by-label/boot /mnt/boot        # adjust label as needed
+  sudo mkdir -p /mnt/boot/efi
   sudo mount /dev/disk/by-label/ESP /mnt/boot/efi      # adjust label as needed
   sudo nixos-install --root /mnt --no-root-passwd
   ```
 
-### Boot Hangs After "Mounted /sysroot/run" (RCU Stalls)
+### Root Rotation Not Working
 
-If the boot gets past ZFS pool import and root rollback but then hangs with messages like:
+If `/rotation-test` persists after reboot (see [Post-Install Verification](#post-install-verification)), work through these steps in order:
 
-```
-rcu_preempt detected expedited stalls on CPUs/tasks
-```
-
-**Root cause:** A race condition between two initrd services. The `rollback` service (`zfs rollback -r rpool/local/root@blank`) and impermanence's `create-needed-for-boot-dirs` service both run before `sysroot.mount`, but without explicit ordering between them. If `create-needed-for-boot-dirs` runs first and creates mount-point directories, `rollback` then wipes them out. Root is empty when `sysroot.mount` runs, so the initrd mount units for `/nix`, `/persist`, etc. fail and the boot deadlocks.
-
-**The fix:** The rollback service must specify `before = [ "sysroot.mount" "create-needed-for-boot-dirs.service" ]` to guarantee this ordering:
-
-```
-zfs-import-rpool → rollback → create-needed-for-boot-dirs → sysroot.mount
-```
-
-Also ensure these lines are in `configuration.nix`:
-
-```nix
-boot.initrd.systemd.enable = true;
-fileSystems."/nix".neededForBoot = true;
-fileSystems."/persist".neededForBoot = true;
-```
-
-**Note:** Impermanence must include [PR #220](https://github.com/nix-community/impermanence/pull/220) (merged Sep 2024) for ZFS support in `create-needed-for-boot-dirs`. If you fetch from `master` (as the template does), you already have it.
-
-**Recovery from a live ISO:**
+**1. Check the initrd boot log**
 
 ```bash
-# 1. Import the pool and mount all datasets
-sudo zpool import -f rpool
-sudo mount -t zfs rpool/local/root /mnt
-sudo mkdir -p /mnt/{nix,home,persist,boot}
-sudo mount -t zfs rpool/local/nix /mnt/nix
-sudo mount -t zfs rpool/safe/home /mnt/home
-sudo mount -t zfs rpool/safe/persist /mnt/persist
-sudo mount /dev/disk/by-label/boot /mnt/boot        # adjust label as needed
-sudo mkdir -p /mnt/boot/efi
-sudo mount /dev/disk/by-label/ESP /mnt/boot/efi      # adjust label as needed
-
-# 2. Update configuration.nix — ensure the rollback service has:
-#      before = [ "sysroot.mount" "create-needed-for-boot-dirs.service" ];
-#    (or copy the full rollback block from the current configuration.nix.tpl)
-sudo nano /mnt/persist/etc/nixos/configuration.nix
-
-# 3. Copy the updated config so nixos-install can find it
-sudo cp /mnt/persist/etc/nixos/configuration.nix /mnt/etc/nixos/configuration.nix
-
-# 4. Rebuild and reboot
-sudo nixos-install --root /mnt --no-root-passwd
-reboot
+sudo journalctl -b | grep -i "btrfs\|subvolume\|old_roots"
 ```
 
-### ZFS Pool Won't Import
+Look for errors during the `postResumeCommands` execution.
+
+**2. Verify the BTRFS partition is accessible**
 
 ```bash
-sudo zpool import           # list available pools
-sudo zpool import -f rpool  # force import (e.g. after unclean shutdown)
+ls /dev/disk/by-partlabel/disk-main-root
 ```
+
+If missing, the disko partition labels may differ. Check `ls /dev/disk/by-partlabel/` and update `configuration.nix` accordingly.
+
+**3. Test manual rotation**
+
+```bash
+sudo mkdir -p /tmp/btrfs_tmp
+sudo mount /dev/disk/by-partlabel/disk-main-root /tmp/btrfs_tmp
+ls /tmp/btrfs_tmp/
+# You should see: root, nix, persistent, home (and old_roots if rotation has worked before)
+sudo umount /tmp/btrfs_tmp
+```
+
+**4. Verify subvolume mount**
+
+```bash
+mount | grep "subvol"
+```
+
+Ensure `/` is mounted with `subvol=root` (or `subvol=/root`).
+
+**5. Rebuild and reboot**
+
+After making any configuration changes:
+
+```bash
+sudo nixos-rebuild switch
+sudo reboot
+```
+
+Then re-run the rotation test (`sudo touch /rotation-test && sudo reboot`).
 
 ### `envsubst: command not found`
 
@@ -412,93 +409,25 @@ error: The option 'fileSystems."/boot".device' has conflicting definition values
 
 This means `hardware-configuration.nix` contains `fileSystems` entries that conflict with disko's declarations in `disk-config.nix`. The install script automatically strips these during generation, but if you regenerate `hardware-configuration.nix` manually, you must remove the `fileSystems` and `swapDevices` blocks from it — disko manages all filesystem declarations.
 
-### Root Rollback Not Working
-
-If `/rollback-test` persists after reboot (see [Post-Install Verification](#post-install-verification)), work through these steps in order:
-
-**1. Verify the systemd initrd is active**
-
-The configuration sets `boot.initrd.systemd.enable = true`. Confirm it is active:
-
-```bash
-ls /run/initramfs/etc/systemd/ 2>/dev/null && echo "systemd initrd" || echo "scripted initrd"
-```
-
-If you see "scripted initrd", the systemd initrd may not have been applied. Rebuild and reboot:
-
-```bash
-sudo nixos-rebuild switch
-sudo reboot
-```
-
-**2. Check the rollback service status**
-
-After boot, inspect the initrd rollback service:
-
-```bash
-sudo journalctl -b -u rollback.service
-```
-
-Look for errors. Common issues:
-- `zfs-import-rpool.service` failed or is missing — check `sudo journalctl -b -u zfs-import-rpool.service`
-- `zfs rollback` error — snapshot missing or has dependent clones
-
-**3. Verify the blank snapshot exists**
-
-```bash
-sudo zfs list -t snapshot | grep blank
-```
-
-Expected: `rpool/local/root@blank`. If missing, create it:
-
-```bash
-sudo zfs snapshot rpool/local/root@blank
-```
-
-**4. Test manual rollback**
-
-```bash
-sudo zfs rollback -r rpool/local/root@blank
-```
-
-If this errors with "more recent snapshots or clones exist", list and remove them:
-
-```bash
-sudo zfs list -t snapshot -r rpool/local/root
-sudo zfs destroy rpool/local/root@<offending-snapshot>
-```
-
-**5. Rebuild and reboot**
-
-After making any configuration changes:
-
-```bash
-sudo nixos-rebuild switch
-sudo reboot
-```
-
-Then re-run the rollback test (`sudo touch /rollback-test && sudo reboot`).
-
 ### Password Not Working
 
-- The hashed password lives at `/persist/passwords/<username>`
+- The hashed password lives at `/persistent/passwords/<username>`
 - Verify it exists and has correct permissions:
   ```bash
-  sudo ls -la /persist/passwords/
+  sudo ls -la /persistent/passwords/
   ```
-- To reset, boot the live ISO, import the pool, and overwrite:
+- To reset, boot the live ISO, mount the partition, and overwrite:
   ```bash
-  sudo zpool import -f rpool
-  sudo mount -t zfs rpool/safe/persist /mnt
+  sudo mount /dev/disk/by-partlabel/disk-main-root /mnt -o subvol=persistent
   mkpasswd -m sha-512 "newpassword" | sudo tee /mnt/passwords/<username>
   ```
 
 ### Adding New Services
 
-When you add services that store state (databases, containers, etc.), persist their data directories by adding them to `environment.persistence."/persist"` in `configuration.nix`:
+When you add services that store state (databases, containers, etc.), persist their data directories by adding them to `environment.persistence."/persistent"` in `configuration.nix`:
 
 ```nix
-environment.persistence."/persist" = {
+environment.persistence."/persistent" = {
   directories = [
     # ... existing entries ...
     "/var/lib/my-new-service"
@@ -510,4 +439,17 @@ Then rebuild:
 
 ```bash
 sudo nixos-rebuild switch
+```
+
+### Recovering Files from Old Roots
+
+One advantage of BTRFS root rotation over ZFS rollback is that old roots are preserved for 30 days. If you accidentally lost a file:
+
+```bash
+sudo mkdir -p /tmp/btrfs_tmp
+sudo mount /dev/disk/by-partlabel/disk-main-root /tmp/btrfs_tmp
+ls /tmp/btrfs_tmp/old_roots/
+# Browse timestamped directories to find your file
+sudo cp /tmp/btrfs_tmp/old_roots/<timestamp>/path/to/file /destination
+sudo umount /tmp/btrfs_tmp
 ```
